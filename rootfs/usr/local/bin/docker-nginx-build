@@ -99,9 +99,9 @@ pkg_install() {
 	apk)
 		if [ -n "$VIRTUAL" ]
 		then
-			apk add --no-cache --virtual ".$VIRTUAL" ${pkgs}
+			apk add --virtual ".$VIRTUAL" ${pkgs}
 		else
-			apk add --no-cache ${pkgs}
+			apk add ${pkgs}
 		fi
 		;;
 	*)
@@ -117,7 +117,12 @@ pkg_install() {
 pkg_purge() {
 	if command -v apk 2>/dev/null >/dev/null
 	then
-		apk del --no-cache "${apk}" "$@"
+		if [ -n "$VIRTUAL" ]
+		then
+			apk del ".$VIRTUAL"
+		else
+			apk del "$@"
+		fi
 	else
 		DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y
 	fi
@@ -168,7 +173,7 @@ DEPENDENCIES="${base_nginx_deps}"
 
 for module in /usr/lib/nginx/modules/*.so
 do
-	this_dep_pkgs="$(find_runtime_dependency_pkgs "$module")"
+	this_dep_pkgs="$(strip_version_from_pkg_name $(find_runtime_dependency_pkgs "$module"))"
 	DEPENDENCIES="${DEPENDENCIES} ${this_dep_pkgs}"
 	echo "* module $module has these package dependencies:" $this_dep_pkgs >&2
 done
@@ -222,7 +227,7 @@ fi
 	. /etc/os-release
 	versionsuffix="$ID$VERSION_ID-nginx$NGINX_VERSION"
 
-	required_packages="$(find_runtime_dependency_pkgs objs/*.so)"
+	required_packages="$(strip_version_from_pkg_name $(find_runtime_dependency_pkgs objs/*.so))"
 	pkg_install ${required_packages}
 	VIRTUAL=build-deps pkg_purge
 
