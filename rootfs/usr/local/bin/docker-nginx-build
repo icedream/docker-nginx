@@ -1,0 +1,239 @@
+#!/bin/sh
+
+set -e
+
+resolve_package() {
+	for pkg in "$@"
+	do
+		if command -v apk 2>/dev/null >/dev/null
+		then
+			apk info -v -e "$pkg"
+		else
+			dpkg-query -W "$pkg" | sed 's,\s\+,=,g'
+		fi
+	done |\
+	sort |\
+	uniq
+}
+
+strip_version_from_pkg_name() {
+	for pkg in "$@"
+	do
+		if command -v apk 2>/dev/null >/dev/null
+		then
+			echo "$pkg" | sed 's,-[0-9a-zA-Z.]\+-r[0-9]\+$,,'
+		else
+			apt-cache show "$pkg" | grep -Po '^Package:\s+\K.+'
+		fi
+	done
+}
+
+find_runtime_dependency_pkgs() {
+	for p in "$@"
+	do
+		ldd "$p" 2>/dev/null |\
+		grep '=> .\+\.so' |\
+		awk '{print $3}'
+	done |\
+	sort |\
+	uniq |\
+	while read -r so
+	do
+		pkg_who_owns "$so"
+	done |\
+	sort |\
+	uniq
+}
+
+find_devel_pkg() {
+	# shellcheck disable=SC2046
+	strip_version_from_pkg_name $(
+		pkg_depends "$1" |\
+		grep '.\+-dev' |\
+		sort |\
+		uniq |\
+		awk '{print $1}'
+	)
+}
+
+pkg_who_owns() {
+	if command -v apk 2>/dev/null >/dev/null
+	then
+		apk info --who-owns "$1" | awk '{print $5}'
+	else
+		dpkg -S "$@" | cut -d: -f 1 | sort | uniq
+	fi
+}
+
+pkg_update() {
+	if command -v apk 2>/dev/null >/dev/null
+	then
+		apk update
+	else
+		DEBIAN_FRONTEND=noninteractive apt-get update
+	fi
+}
+
+pkg_install() {
+	if command -v apk 2>/dev/null >/dev/null
+	then
+		pkg_manager=apk
+	else
+		pkg_manager=apt
+	fi
+	for pkg in "$@"
+	do
+		filtered_pkg="${pkg/@.+$/}"
+		match_filtered_pkg="${pkg/@${pkg_manager}/}"
+		if [ "$filtered_pkg" != "" ] && [ "$filtered_pkg" != "$match_filtered_pkg" ]
+		then
+			# Specific package for this system
+			pkgs="$pkgs $match_filtered_pkg"
+		elif [ "$filtered_pkg" = "$pkg" ]
+		then
+			# General package
+			pkgs="$pkgs $match_filtered_pkg"
+		fi
+	done
+	case "$pkg_manager" in
+	apk)
+		if [ -n "$VIRTUAL" ]
+		then
+			apk add --no-cache --virtual ".$VIRTUAL" ${pkgs}
+		else
+			apk add --no-cache ${pkgs}
+		fi
+		;;
+	*)
+		DEBIAN_FRONTEND=noninteractive apt-get install ${pkgs}
+		if [ -n "$VIRTUAL" ]
+		then
+			DEBIAN_FRONTEND=noninteractive apt-mark auto ${pkgs}
+		fi
+		;;
+	esac
+}
+
+pkg_purge() {
+	if command -v apk 2>/dev/null >/dev/null
+	then
+		apk del --no-cache "${apk}" "$@"
+	else
+		DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y
+	fi
+}
+
+pkg_dependencies() {
+	if command -v apk 2>/dev/null >/dev/null
+	then
+		apk info -v -R "$@" | head -n1 | sed 's,^.\+:\s\+,,'
+	else
+		apt-cache depends "$@" | grep -Po '^\s+Depends:\s+\K.+'
+	fi
+}
+
+pkg_depends() {
+	if command -v apk 2>/dev/null >/dev/null
+	then
+		apk list -d "$@"
+	else
+		apt-cache rdepends "$@" | grep -Po '^\s+\K.+'
+	fi
+}
+
+# retrieve configure args of already packaged nginx
+NGINX_CONFIGURE_ARGS="$(nginx -V 2>&1 | grep -o '^configure arguments: .*$' | sed 's,^configure arguments: ,,g')"
+# remove preconfigured dynamic modules so only ours will be placed in the objs folder
+NGINX_CONFIGURE_ARGS="$(printf '%s' "$NGINX_CONFIGURE_ARGS" | sed 's,--with-[^=]\+module=dynamic,,g')"
+echo "* NGINX_CONFIGURE_ARGS:" $NGINX_CONFIGURE_ARGS >&2
+
+# Determine all dependencies used for the packaged nginx and install them
+if command -v dpkg 2>/dev/null >/dev/null
+then
+	wget -qO- "https://nginx.org/keys/nginx_signing.key" | apt-key add -
+	# echo "deb http://nginx.org/packages/debian $(. /etc/os-release && printf "%s" "$VERSION_CODENAME") nginx" >> /etc/apt/sources.list.d/nginx-src.list
+	echo "deb-src http://nginx.org/packages/mainline/debian $(. /etc/os-release && printf "%s" "$VERSION_CODENAME") nginx" >> /etc/apt/sources.list.d/nginx-src.list
+fi
+pkg_update
+
+DEPENDENCIES=""
+
+nginx_deps="$(pkg_dependencies nginx)"
+echo "* nginx has these package dependencies:" $nginx_deps >&2
+resolved_nginx_deps="$(resolve_package $nginx_deps)"
+echo "*   resolves to:" $resolved_nginx_deps >&2
+base_nginx_deps="$(strip_version_from_pkg_name ${resolved_nginx_deps})"
+echo "*   strips to:" $base_nginx_deps >&2
+DEPENDENCIES="${base_nginx_deps}"
+
+for module in /usr/lib/nginx/modules/*.so
+do
+	this_dep_pkgs="$(find_runtime_dependency_pkgs "$module")"
+	DEPENDENCIES="${DEPENDENCIES} ${this_dep_pkgs}"
+	echo "* module $module has these package dependencies:" $this_dep_pkgs >&2
+done
+
+DEPENDENCIES="$(echo ${DEPENDENCIES} | sort | uniq)"
+echo "* All dependencies:" $DEPENDENCIES >&2
+
+if command -v dpkg 2>/dev/null >/dev/null
+then
+	echo "deb http://nginx.org/packages/debian $(. /etc/os-release && printf "%s" "$VERSION_CODENAME") nginx" >> /etc/apt/sources.list/nginx-src.list
+else
+	DEVPACKAGES="$(
+		for dep in $DEPENDENCIES
+		do
+			deps=$(find_devel_pkg "$dep")
+			echo $deps
+			echo "*   Devel packages of $dep:" $deps >&2
+		done | sort | uniq
+	)"
+fi
+echo "* DEVPACKAGES:" $DEVPACKAGES >&2
+
+VIRTUAL=build-deps pkg_install \
+	gcc \
+	libc-dev \
+	make \
+	linux-headers \
+	$DEVPACKAGES
+
+nginx_source_pkg_dir="/usr/src/nginx-${NGINX_VERSION}"
+nginx_source_pkg_remove=0
+if [ ! -d "${nginx_source_pkg_dir}" ]
+then
+	nginx_source_pkg_remove=1
+	docker-nginx-download-source
+fi
+
+(
+	set -x
+	cd "${nginx_source_pkg_dir}"
+
+	configure_temp_script=$(mktemp)
+	(echo "#!/bin/sh -e" && echo "exec ./configure $NGINX_CONFIGURE_ARGS \"\$@\"") > "${configure_temp_script}"
+	chmod +x "${configure_temp_script}"
+
+	"${configure_temp_script}" "$@"
+	rm -f "${configure_temp_script}"
+
+	make modules
+
+	. /etc/os-release
+	versionsuffix="$ID$VERSION_ID-nginx$NGINX_VERSION"
+
+	required_packages="$(find_runtime_dependency_pkgs objs/*.so)"
+	pkg_install ${required_packages}
+	VIRTUAL=build-deps pkg_purge
+
+	for so in objs/*.so
+	do
+		name="$(basename "$so" .so)"
+		install -m644 -v "$so" /usr/lib/nginx/modules/
+	done
+)
+
+if [ "$nginx_source_pkg_remove" -ne 0 ]
+then
+	rm -r "${nginx_source_pkg_dir}"
+fi

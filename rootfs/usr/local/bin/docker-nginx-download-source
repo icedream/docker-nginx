@@ -1,0 +1,39 @@
+#!/bin/sh
+
+set -e
+
+NGINX_GPG_KEYS="B0F4253373F8F6F510D42178520A9993A1C052F8"
+
+# NGINX_VERSION is provided by the Nginx Docker image as env var
+NGINX_URL="https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz"
+
+filename="/usr/src/nginx-${NGINX_VERSION}.tar.gz"
+
+if command -v curl 2>/dev/null >/dev/null
+then
+	curl -sLo "${filename}" "$NGINX_URL"
+	curl -sLo "${filename}.asc" "$NGINX_URL.asc"
+else
+	wget -qO "${filename}" "$NGINX_URL"
+	wget -qO "${filename}.asc" "$NGINX_URL.asc"
+fi
+
+# GnuPG download integrity check
+GNUPGHOME="$(mktemp -d)"
+export GNUPGHOME
+for server in \
+	hkp://keyserver.ubuntu.com:80 \
+	hkp://p80.pool.sks-keyservers.net:80 \
+	hkp://keys.gnupg.net \
+	ha.pool.sks-keyservers.net  \
+	pgp.mit.edu \
+; do
+	echo "Fetching GPG key $NGINX_GPG_KEYS from $server"
+	gpg --keyserver "$server" --keyserver-options timeout=10 --recv-keys "$NGINX_GPG_KEYS" && found=yes && break
+done
+test -z "$found" && echo >&2 "error: failed to fetch GPG key $GPG_KEYS" && exit 1
+gpg --batch --verify "${filename}.asc" "${filename}"
+rm -rf "$GNUPGHOME" "${filename}.asc"
+
+tar -C /usr/src -zx -f "${filename}"
+rm "${filename}"
