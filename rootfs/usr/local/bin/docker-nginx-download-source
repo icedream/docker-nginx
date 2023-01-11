@@ -14,6 +14,7 @@ NGINX_GPG_KEYS="
 NGINX_URL="https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz"
 
 filename="/usr/src/nginx-${NGINX_VERSION}.tar.gz"
+mkdir -p "$(dirname "$filename")"
 
 if command -v curl 2>/dev/null >/dev/null
 then
