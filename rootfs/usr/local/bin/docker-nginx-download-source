@@ -28,7 +28,7 @@ fi
 GNUPGHOME="$(mktemp -d)"
 export GNUPGHOME
 for key in $NGINX_GPG_KEYS; do
-	if [ "x${key#(http|https):}" != "x$key" ]; do
+	if [ "x${key#(http|https):}" != "x$key" ]; then
 		# URL
 		echo >&2 "Fetching GPG key from $key"
 		curl -sL "$key" |\
